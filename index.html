@@ -1,0 +1,1788 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Слепая раскраска — Интерактивная игра для класса</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- PeerJS для прямой P2P-связи (WebRTC) между учителем и учениками -->
+    <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+    <!-- Генератор QR-кода для быстрого входа учеников с телефона -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@500;600;700;800;900&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Nunito', sans-serif;
+            background: linear-gradient(135deg, #f0f4ff 0%, #fdf2f8 50%, #fefce8 100%);
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        /* Явное управление видимостью экранов без конфликтов CSS */
+        .screen-panel {
+            display: none;
+        }
+        .screen-panel.is-active {
+            display: block;
+        }
+        .screen-panel-grid {
+            display: none;
+        }
+        .screen-panel-grid.is-active {
+            display: grid;
+        }
+
+        /* Режим слепой раскраски: накладываем ч/б фильтр до нажатия «Готово!» */
+        .blind-filter {
+            filter: grayscale(100%) contrast(94%) brightness(102%);
+            transition: filter 1.3s cubic-bezier(0.22, 1, 0.36, 1);
+        }
+
+        .blind-filter-revealed {
+            filter: grayscale(0%) contrast(100%) brightness(100%);
+            transition: filter 1.3s cubic-bezier(0.22, 1, 0.36, 1);
+        }
+
+        /* Сектора SVG раскраски */
+        .coloring-svg {
+            width: 100%;
+            height: 100%;
+            max-width: 100%;
+            max-height: 100%;
+            display: block;
+        }
+        .coloring-svg [data-sector] {
+            cursor: pointer;
+            transition: fill 0.2s ease, opacity 0.2s ease;
+        }
+        .coloring-svg [data-sector]:hover {
+            opacity: 0.86;
+        }
+        .coloring-svg [data-sector]:active {
+            opacity: 0.72;
+        }
+
+        @keyframes popIn {
+            0% { transform: scale(0.88); opacity: 0; }
+            70% { transform: scale(1.03); }
+            100% { transform: scale(1); opacity: 1; }
+        }
+        .animate-pop {
+            animation: popIn 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+        }
+
+        @keyframes pulseGlow {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.55); }
+            50% { box-shadow: 0 0 0 14px rgba(16, 185, 129, 0); }
+        }
+        .btn-ready-glow {
+            animation: pulseGlow 2s infinite;
+        }
+
+        @keyframes fadeSlide {
+            from { opacity: 0; transform: translateY(8px) scale(0.98); }
+            to { opacity: 1; transform: translateY(0) scale(1); }
+        }
+        .collage-hero-enter {
+            animation: fadeSlide 0.55s ease-out forwards;
+        }
+
+        #confetti-canvas {
+            position: fixed;
+            inset: 0;
+            pointer-events: none;
+            z-index: 9999;
+        }
+
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: rgba(0, 0, 0, 0.04);
+            border-radius: 999px;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: rgba(99, 102, 241, 0.3);
+            border-radius: 999px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: rgba(99, 102, 241, 0.5);
+        }
+    </style>
+</head>
+<body class="text-slate-800 antialiased selection:bg-indigo-200 selection:text-indigo-900">
+
+    <!-- Холст для праздничного конфетти -->
+    <canvas id="confetti-canvas"></canvas>
+
+    <!-- Контейнер уведомлений -->
+    <div id="toast-container" class="fixed top-4 right-4 z-50 flex flex-col gap-2 max-w-sm w-full pointer-events-none px-4 sm:px-0"></div>
+
+    <!-- Модальное окно подтверждения -->
+    <div id="confirm-modal" class="hidden fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-4">
+        <div class="bg-white rounded-3xl shadow-2xl max-w-md w-full p-6 sm:p-8 animate-pop border border-slate-100">
+            <h3 id="confirm-title" class="text-xl font-extrabold text-slate-900 mb-2">Подтверждение</h3>
+            <p id="confirm-message" class="text-slate-600 mb-6 leading-relaxed">Вы уверены?</p>
+            <div class="flex gap-3 justify-end">
+                <button id="confirm-cancel" type="button" class="px-5 py-2.5 rounded-2xl font-bold text-slate-600 bg-slate-100 hover:bg-slate-200 transition">Отмена</button>
+                <button id="confirm-ok" type="button" class="px-5 py-2.5 rounded-2xl font-bold text-white bg-indigo-600 hover:bg-indigo-700 shadow-lg shadow-indigo-200 transition">Продолжить</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Верхняя навигационная панель -->
+    <header class="sticky top-0 z-30 bg-white/85 backdrop-blur-md border-b border-slate-200/70">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-2">
+            <div class="flex items-center gap-3 cursor-pointer" onclick="app.confirmGoHome()">
+                <div class="w-10 h-10 rounded-2xl bg-gradient-to-tr from-indigo-600 via-purple-500 to-pink-500 flex items-center justify-center text-white shadow-md shrink-0">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M7 21a4 4 0 01-4-4V5a2 2 0 012-2h4a2 2 0 012 2v12a4 4 0 01-4 4zm0 0h12a2 2 0 002-2v-4a2 2 0 00-2-2h-2.343M11 7.343l1.657-1.657a2 2 0 012.828 0l2.829 2.829a2 2 0 010 2.828l-8.486 8.485M7 17h.01" />
+                    </svg>
+                </div>
+                <div>
+                    <span class="font-black text-lg sm:text-xl tracking-tight bg-gradient-to-r from-indigo-600 to-pink-600 bg-clip-text text-transparent">Слепая раскраска</span>
+                    <span id="header-role-badge" class="hidden sm:inline-block ml-2 px-2.5 py-0.5 text-xs font-extrabold rounded-full bg-indigo-100 text-indigo-700"></span>
+                </div>
+            </div>
+
+            <div class="flex items-center gap-2 sm:gap-3">
+                <!-- Индикатор P2P-подключения -->
+                <div id="connection-status" class="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold bg-slate-100 text-slate-600">
+                    <span id="connection-dot" class="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse"></span>
+                    <span id="connection-text">Готово</span>
+                </div>
+
+                <!-- Бейдж 4-значного кода комнаты -->
+                <button id="room-code-pill" type="button" onclick="app.copyRoomCode()" title="Нажмите, чтобы скопировать код комнаты" class="hidden items-center gap-1.5 px-3 py-1.5 rounded-full text-xs sm:text-sm font-extrabold bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100 transition">
+                    <span>Комната:</span>
+                    <span id="header-room-code" class="tracking-widest font-black">----</span>
+                    <svg class="w-3.5 h-3.5 opacity-70" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>
+                </button>
+
+                <!-- Кнопка выхода -->
+                <button id="btn-change-role" type="button" onclick="app.confirmGoHome()" class="hidden px-3 py-1.5 rounded-xl text-xs sm:text-sm font-bold text-slate-600 hover:text-slate-900 hover:bg-slate-100 transition">
+                    Выйти
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <!-- Основной контейнер -->
+    <main class="max-w-7xl mx-auto px-4 sm:px-6 py-6 sm:py-8">
+
+        <!-- ========================================================= -->
+        <!-- ЭКРАН 1: СТАРТОВЫЙ ВЫБОР РОЛИ                             -->
+        <!-- ========================================================= -->
+        <section id="view-landing" class="screen-panel is-active max-w-4xl mx-auto animate-pop">
+            <div class="text-center mb-8 sm:mb-10">
+                <div class="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-white shadow-sm border border-purple-100 text-purple-700 font-bold text-sm mb-4">
+                    <span>🎨 Творческая игра-сюрприз для всего класса (PeerJS P2P)</span>
+                </div>
+                <h1 class="text-3xl sm:text-5xl font-black text-slate-900 tracking-tight mb-4 leading-tight">
+                    Раскрашивай вслепую — <br class="hidden sm:inline" />
+                    <span class="bg-gradient-to-r from-indigo-600 via-purple-600 to-pink-500 bg-clip-text text-transparent">удивляйся результату!</span>
+                </h1>
+                <p class="text-slate-600 text-base sm:text-lg max-w-2xl mx-auto">
+                    Учитель выбирает картинку и запускает урок, а ученики раскрашивают её черно-белой палитрой, не зная настоящих цветов. В конце цвета проявляются, и работы собираются в коллаж!
+                </p>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6 sm:gap-8">
+                <!-- Карточка Учителя -->
+                <div class="bg-white rounded-3xl p-6 sm:p-8 shadow-xl shadow-indigo-100/60 border-2 border-transparent hover:border-indigo-300 transition-all flex flex-col justify-between group">
+                    <div>
+                        <div class="w-16 h-16 rounded-2xl bg-indigo-100 text-indigo-600 flex items-center justify-center mb-6 group-hover:scale-110 transition-transform">
+                            <svg class="w-9 h-9" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+                            </svg>
+                        </div>
+                        <h2 class="text-2xl font-black text-slate-900 mb-2">Я — Учитель</h2>
+                        <p class="text-slate-600 mb-6 text-sm sm:text-base leading-relaxed">
+                            Получите 4-значный код комнаты и QR-код, выберите раскраску для класса и смотрите живой коллаж из работ учеников на большом экране.
+                        </p>
+                    </div>
+                    <button type="button" onclick="app.enterAsTeacher()" class="w-full py-4 px-6 rounded-2xl font-extrabold text-white bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 shadow-lg shadow-indigo-200 active:scale-[0.98] transition text-lg">
+                        Создать комнату учителя →
+                    </button>
+                </div>
+
+                <!-- Карточка Ученика -->
+                <div class="bg-white rounded-3xl p-6 sm:p-8 shadow-xl shadow-pink-100/60 border-2 border-transparent hover:border-pink-300 transition-all flex flex-col justify-between group">
+                    <div>
+                        <div class="w-16 h-16 rounded-2xl bg-pink-100 text-pink-600 flex items-center justify-center mb-6 group-hover:scale-110 transition-transform">
+                            <svg class="w-9 h-9" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                            </svg>
+                        </div>
+                        <h2 class="text-2xl font-black text-slate-900 mb-2">Я — Ученик</h2>
+                        <p class="text-slate-600 mb-4 text-sm sm:text-base">
+                            Введите своё имя и 4-значный код комнаты от учителя (или перейдите по ссылке из QR-кода).
+                        </p>
+                        <div class="space-y-3 mb-6">
+                            <div>
+                                <label class="block text-xs font-extrabold uppercase tracking-wider text-slate-500 mb-1">Твоё имя</label>
+                                <div class="flex gap-2">
+                                    <input id="student-name-input" type="text" maxlength="22" placeholder="Например: Алиса" class="w-full px-4 py-2.5 rounded-xl border-2 border-slate-200 focus:border-pink-500 focus:outline-none font-bold text-slate-800 bg-slate-50 focus:bg-white transition">
+                                    <button type="button" onclick="app.fillRandomStudentName()" title="Случайное имя" class="px-3.5 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold transition">🎲</button>
+                                </div>
+                            </div>
+                            <div>
+                                <label class="block text-xs font-extrabold uppercase tracking-wider text-slate-500 mb-1">4-значный код комнаты</label>
+                                <input id="student-room-input" type="text" maxlength="4" placeholder="Например: 4829" class="w-full px-4 py-2.5 rounded-xl border-2 border-slate-200 focus:border-pink-500 focus:outline-none font-black uppercase tracking-[0.25em] text-center text-lg text-slate-800 bg-slate-50 focus:bg-white transition">
+                            </div>
+                        </div>
+                    </div>
+                    <button type="button" onclick="app.enterAsStudent()" class="w-full py-4 px-6 rounded-2xl font-extrabold text-white bg-gradient-to-r from-pink-500 to-rose-500 hover:from-pink-600 hover:to-rose-600 shadow-lg shadow-pink-200 active:scale-[0.98] transition text-lg">
+                        Войти в комнату 🎨
+                    </button>
+                </div>
+            </div>
+        </section>
+
+        <!-- ========================================================= -->
+        <!-- ЭКРАН 2: РЕЖИМ УЧИТЕЛЯ                                      -->
+        <!-- ========================================================= -->
+        <section id="view-teacher" class="screen-panel space-y-8">
+            <!-- Блок комнаты, QR-кода и статуса подключения учеников -->
+            <div class="bg-white rounded-3xl p-6 shadow-lg border border-slate-100 grid grid-cols-1 lg:grid-cols-12 gap-6 items-center">
+                <div class="lg:col-span-5 space-y-3">
+                    <div class="flex flex-wrap items-center gap-2">
+                        <span class="px-3 py-1 rounded-full text-xs font-extrabold bg-indigo-100 text-indigo-700">Комната класса</span>
+                        <span id="teacher-lesson-status" class="px-3 py-1 rounded-full text-xs font-extrabold bg-amber-100 text-amber-800">
+                            ⏳ Ожидание запуска
+                        </span>
+                    </div>
+                    <div class="flex items-center gap-3">
+                        <div id="teacher-room-code-display" class="text-4xl font-black tracking-[0.2em] text-indigo-700 bg-indigo-50 px-5 py-2.5 rounded-2xl border-2 border-indigo-200 select-all">
+                            ----
+                        </div>
+                        <button type="button" onclick="app.copyRoomCode()" class="px-4 py-3 rounded-2xl font-bold text-sm bg-slate-100 hover:bg-slate-200 text-slate-700 transition">
+                            Копировать код
+                        </button>
+                    </div>
+                    <div class="flex flex-wrap items-center gap-3 pt-1 text-sm font-bold text-slate-600">
+                        <span class="inline-flex items-center gap-1.5 bg-emerald-50 text-emerald-700 px-3 py-1.5 rounded-xl border border-emerald-200">
+                            <span class="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>
+                            Подключено учеников: <span id="connected-students-count" class="font-black text-base">0</span>
+                        </span>
+                        <button type="button" onclick="app.copyInviteLink()" class="text-indigo-600 hover:text-indigo-800 underline text-xs font-extrabold">
+                            Скопировать ссылку для входа
+                        </button>
+                    </div>
+                </div>
+
+                <!-- QR-код и прямая ссылка -->
+                <div class="lg:col-span-7 flex flex-col sm:flex-row items-center gap-5 bg-slate-50 rounded-2xl p-4 border border-slate-200/80">
+                    <div id="teacher-qr-box" class="bg-white p-2.5 rounded-2xl shadow-sm border border-slate-200 shrink-0 flex items-center justify-center min-w-[120px] min-h-[120px]"></div>
+                    <div class="space-y-2 text-center sm:text-left w-full overflow-hidden">
+                        <div class="font-black text-slate-800 text-base">Быстрый вход учеников со смартфона</div>
+                        <p class="text-xs text-slate-500">Наведите камеру телефона на QR-код или откройте ссылку — код комнаты подставится автоматически.</p>
+                        <input id="teacher-invite-link" type="text" readonly class="w-full text-xs font-mono bg-white px-3 py-2 rounded-xl border border-slate-200 text-slate-600 select-all">
+                    </div>
+                </div>
+            </div>
+
+            <!-- Шаг 1: Выбор шаблона и запуск раскраски -->
+            <div class="bg-white rounded-3xl p-6 sm:p-8 shadow-lg border border-slate-100">
+                <div class="flex flex-col lg:flex-row lg:items-center justify-between gap-4 mb-6">
+                    <div>
+                        <div class="flex items-center gap-2 mb-1">
+                            <span class="px-3 py-1 rounded-full text-xs font-extrabold bg-indigo-100 text-indigo-700">Шаг 1</span>
+                            <h2 class="text-xl sm:text-2xl font-black text-slate-900">Выберите картинку для раскрашивания</h2>
+                        </div>
+                        <p class="text-slate-500 text-sm sm:text-base">
+                            Выберите шаблон и нажмите «Запустить раскраску для класса». Если ученик подключится позже — картинка отправится ему автоматически.
+                        </p>
+                    </div>
+                    <div class="flex flex-wrap items-center gap-3">
+                        <button type="button" onclick="app.resendTemplateToAllStudents()" class="px-4 py-3.5 rounded-2xl font-extrabold text-sm bg-indigo-50 text-indigo-700 border-2 border-indigo-200 hover:bg-indigo-100 active:scale-95 transition">
+                            🔄 Повторно отправить картинку ученикам
+                        </button>
+                        <button type="button" onclick="app.launchTemplateForClass()" class="px-6 py-3.5 rounded-2xl font-black text-white bg-gradient-to-r from-indigo-600 via-purple-600 to-pink-600 hover:from-indigo-700 hover:to-pink-700 shadow-lg shadow-indigo-200 active:scale-95 transition text-base">
+                            🚀 Запустить раскраску для класса
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Сетка из 5 шаблонов -->
+                <div id="teacher-templates-grid" class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4"></div>
+            </div>
+
+            <!-- Шаг 2: Живой динамический коллаж -->
+            <div class="bg-white rounded-3xl p-6 sm:p-8 shadow-lg border border-slate-100">
+                <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6">
+                    <div>
+                        <div class="flex items-center gap-2.5 mb-1">
+                            <span class="px-3 py-1 rounded-full text-xs font-extrabold bg-emerald-100 text-emerald-700">Живой коллаж</span>
+                            <h2 class="text-xl sm:text-2xl font-black text-slate-900">Работы учеников (<span id="submissions-count">0</span>)</h2>
+                        </div>
+                        <p class="text-slate-500 text-sm">Одна работа крупно в центре, остальные рядом. Главная картинка меняется каждые 10 секунд.</p>
+                    </div>
+
+                    <div class="flex flex-wrap items-center gap-2.5">
+                        <button type="button" onclick="app.addDemoSubmission()" class="px-4 py-2.5 rounded-2xl font-extrabold text-sm bg-amber-100 text-amber-800 hover:bg-amber-200 transition">
+                            ✨ Добавить демо-работу
+                        </button>
+                        <button type="button" onclick="app.confirmClearSubmissions()" class="px-4 py-2.5 rounded-2xl font-extrabold text-sm bg-slate-100 text-slate-600 hover:bg-rose-100 hover:text-rose-700 transition">
+                            Очистить коллаж
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Пустое состояние -->
+                <div id="collage-empty-state" class="py-12 px-4 text-center bg-slate-50 rounded-3xl border-2 border-dashed border-slate-200">
+                    <div class="text-5xl mb-3">🖼️</div>
+                    <h3 class="text-lg font-extrabold text-slate-800 mb-1">Пока нет готовых рисунков</h3>
+                    <p class="text-slate-500 text-sm max-w-md mx-auto mb-5">
+                        Когда ученики закрасят все сектора и нажмут «Готово! Показать цвета!», их работы сразу появятся здесь.
+                    </p>
+                    <button type="button" onclick="app.addDemoSubmission()" class="px-5 py-2.5 rounded-2xl font-bold text-sm bg-indigo-600 text-white hover:bg-indigo-700 shadow-md transition">
+                        + Добавить демо-работу для проверки коллажа
+                    </button>
+                </div>
+
+                <!-- Активный коллаж -->
+                <div id="collage-active-container" class="screen-panel-grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+                    <div class="lg:col-span-7 bg-gradient-to-br from-indigo-50 via-purple-50 to-pink-50 rounded-3xl p-4 sm:p-6 border-2 border-indigo-200/80 shadow-inner">
+                        <div class="flex items-center justify-between gap-2 mb-3">
+                            <div class="flex items-center gap-2 flex-wrap">
+                                <span class="px-3 py-1 rounded-full bg-indigo-600 text-white text-xs font-extrabold uppercase tracking-wider shadow-sm">★ Главная работа</span>
+                                <span id="hero-work-author" class="font-black text-lg sm:text-xl text-slate-900">Ученик</span>
+                            </div>
+                            <span id="hero-work-template" class="text-xs font-bold text-slate-600 bg-white/90 px-3 py-1 rounded-full">Картинка</span>
+                        </div>
+
+                        <div class="w-full h-2 bg-white/80 rounded-full overflow-hidden mb-4 shadow-inner">
+                            <div id="slideshow-progress-bar" class="h-full bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 transition-all duration-100 ease-linear" style="width: 100%"></div>
+                        </div>
+
+                        <div id="hero-work-canvas" class="bg-white rounded-2xl p-4 sm:p-6 shadow-md aspect-square max-h-[460px] mx-auto flex items-center justify-center collage-hero-enter"></div>
+
+                        <div class="mt-3 flex items-center justify-between text-xs font-bold text-slate-500">
+                            <span id="hero-work-time">Только что</span>
+                            <div class="flex items-center gap-2">
+                                <button type="button" onclick="app.toggleSlideshowPause()" id="btn-pause-slideshow" class="px-3 py-1 rounded-xl bg-white hover:bg-slate-100 text-slate-700 shadow-sm transition">
+                                    ⏸ Пауза (10с)
+                                </button>
+                                <button type="button" onclick="app.nextHeroWork()" class="px-3 py-1 rounded-xl bg-white hover:bg-slate-100 text-indigo-700 shadow-sm transition">
+                                    Следующая ⏭
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="lg:col-span-5">
+                        <div class="flex items-center justify-between mb-3">
+                            <h3 class="font-extrabold text-slate-700 text-sm uppercase tracking-wider">Все работы класса</h3>
+                            <span class="text-xs font-bold text-slate-400">Нажмите для выбора</span>
+                        </div>
+                        <div id="collage-thumbnails-grid" class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-2 gap-3 max-h-[540px] overflow-y-auto pr-1"></div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ========================================================= -->
+        <!-- ЭКРАН 3: РЕЖИМ УЧЕНИКА                                      -->
+        <!-- ========================================================= -->
+        <section id="view-student" class="screen-panel max-w-5xl mx-auto">
+            <!-- 3А. Экран ожидания запуска урока учителем -->
+            <div id="student-waiting" class="screen-panel is-active bg-white rounded-3xl p-8 sm:p-12 shadow-xl border border-slate-100 text-center max-w-xl mx-auto animate-pop">
+                <div class="w-20 h-20 rounded-3xl bg-indigo-100 text-indigo-600 flex items-center justify-center text-4xl mx-auto mb-5 animate-bounce">
+                    ⏳
+                </div>
+                <h2 class="text-2xl sm:text-3xl font-black text-slate-900 mb-2">Ожидаем картинку от учителя...</h2>
+                <p class="text-slate-600 mb-6 leading-relaxed">
+                    Ты подключён к комнате <strong id="waiting-room-code" class="text-indigo-700 tracking-widest">----</strong> как <strong id="waiting-student-name" class="text-pink-600">Ученик</strong>. Как только учитель выберет и запустит раскраску, она сразу появится на твоём экране!
+                </p>
+                <div class="flex flex-wrap justify-center gap-3">
+                    <button type="button" onclick="app.requestSyncFromTeacher()" class="px-5 py-2.5 rounded-2xl font-extrabold text-sm bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100 transition">
+                        🔄 Запросить картинку у учителя
+                    </button>
+                    <button type="button" onclick="app.forceOpenFallbackTemplate()" class="px-5 py-2.5 rounded-2xl font-extrabold text-sm bg-slate-100 text-slate-700 hover:bg-slate-200 transition">
+                        🎨 Открыть раскраску сейчас
+                    </button>
+                </div>
+            </div>
+
+            <!-- 3Б. Экран раскрашивания («Слепая раскраска») -->
+            <div id="student-coloring" class="screen-panel space-y-6">
+                <!-- Информационная шапка ученика -->
+                <div class="bg-white rounded-3xl p-4 sm:p-6 shadow-md border border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                    <div>
+                        <div class="flex items-center gap-2">
+                            <span class="text-2xl">🕵️‍♂️</span>
+                            <h2 id="student-template-title" class="text-xl sm:text-2xl font-black text-slate-900">Раскраска</h2>
+                        </div>
+                        <p class="text-slate-500 text-sm mt-0.5">
+                            Выбирай оттенки из черно-белой палитры и нажимай на сектора. Настоящие цвета откроются, когда закрасишь всё!
+                        </p>
+                    </div>
+
+                    <!-- Счетчик прогресса -->
+                    <div class="flex items-center gap-4 bg-slate-50 px-4 py-3 rounded-2xl border border-slate-200/70 shrink-0">
+                        <div>
+                            <div class="text-xs font-extrabold uppercase tracking-wider text-slate-400">Прогресс</div>
+                            <div class="text-lg font-black text-slate-800">
+                                Закрашено: <span id="progress-filled" class="text-indigo-600">0</span> из <span id="progress-total">0</span>
+                            </div>
+                        </div>
+                        <div id="progress-percent" class="w-12 h-12 rounded-2xl bg-indigo-100 text-indigo-700 font-black flex items-center justify-center text-sm">
+                            0%
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Холст + Слепая палитра -->
+                <div class="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+                    <!-- Холст SVG (7 колонок) -->
+                    <div class="lg:col-span-7 bg-white rounded-3xl p-4 sm:p-6 shadow-xl border border-slate-100 flex flex-col items-center justify-center">
+                        <div id="blind-mode-badge" class="mb-4 px-4 py-1.5 rounded-full bg-slate-800 text-white text-xs font-extrabold tracking-wide flex items-center gap-2 shadow">
+                            <span>👁️‍🗨️ Режим «Слепая палитра»: цвета скрыты</span>
+                        </div>
+
+                        <!-- Контейнер SVG с явными размерами и ч/б фильтром -->
+                        <div id="student-canvas-wrapper" class="w-full max-w-[440px] aspect-square bg-white rounded-2xl border-2 border-slate-100 p-2 flex items-center justify-center blind-filter select-none"></div>
+
+                        <!-- Кнопка «Готово! Показать цвета!» при 100% закрашивании -->
+                        <div id="ready-action-area" class="hidden mt-6 w-full max-w-md text-center animate-pop">
+                            <button id="btn-finish-coloring" type="button" onclick="app.revealAndSubmitWork()" class="w-full py-4 px-8 rounded-2xl font-black text-xl text-white bg-gradient-to-r from-emerald-500 via-teal-500 to-cyan-500 hover:from-emerald-600 hover:to-cyan-600 shadow-xl btn-ready-glow active:scale-95 transition flex items-center justify-center gap-3">
+                                <span>🎉 Готово! Показать цвета!</span>
+                            </button>
+                        </div>
+
+                        <!-- Блок после снятия ЧБ-фильтра и отправки учителю -->
+                        <div id="revealed-action-area" class="hidden mt-6 w-full max-w-md text-center animate-pop bg-emerald-50 border border-emerald-200 rounded-2xl p-4">
+                            <div class="text-emerald-800 font-black text-lg mb-1">Ура! Вот какой яркой получилась твоя работа! ✨</div>
+                            <p id="delivery-status-text" class="text-emerald-700 text-sm mb-3">✅ Работа отправлена учителю в коллаж!</p>
+                            <button type="button" onclick="app.resetStudentCanvas()" class="px-5 py-2 rounded-xl bg-white text-emerald-700 font-extrabold text-sm border border-emerald-300 hover:bg-emerald-100 transition">
+                                Раскрасить ещё раз
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Палитра из 16 цветов под ЧБ-фильтром (5 колонок) -->
+                    <div class="lg:col-span-5 bg-white rounded-3xl p-5 sm:p-6 shadow-xl border border-slate-100">
+                        <div class="flex items-center justify-between mb-4">
+                            <div>
+                                <h3 class="text-lg font-black text-slate-900">Палитра красок</h3>
+                                <p id="palette-subtitle" class="text-xs font-bold text-slate-400">16 цветов перемешаны под ЧБ-фильтром</p>
+                            </div>
+                            <button type="button" onclick="app.shufflePalette()" title="Перемешать краски" class="p-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-600 font-bold text-xs transition">
+                                🔀 Перемешать
+                            </button>
+                        </div>
+
+                        <div id="student-palette-wrapper" class="blind-filter">
+                            <div id="palette-grid" class="grid grid-cols-4 gap-3 sm:gap-4 p-2"></div>
+                        </div>
+
+                        <div class="mt-6 pt-4 border-t border-slate-100 flex items-center justify-between gap-2">
+                            <div class="flex items-center gap-3">
+                                <div id="selected-brush-preview" class="w-10 h-10 rounded-full border-4 border-slate-200 shadow-inner blind-filter shrink-0" style="background-color: #ef4444;"></div>
+                                <div>
+                                    <div class="text-xs font-extrabold text-slate-400 uppercase">Активная кисть</div>
+                                    <div id="selected-brush-label" class="text-sm font-black text-slate-700">Загадочный оттенок #1</div>
+                                </div>
+                            </div>
+                            <button type="button" onclick="app.autoFillRemainingForTest()" class="text-xs font-bold text-slate-400 hover:text-indigo-600 underline decoration-dotted transition" title="Быстро докрасить оставшиеся сектора">
+                                Авто-заливка
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 3В. Компактная строка диагностики на экране ученика -->
+            <div id="student-debug-bar" class="mt-6 bg-slate-900/90 text-slate-200 rounded-2xl px-4 py-3 text-xs font-mono flex flex-wrap items-center justify-between gap-2 shadow">
+                <span>Peer: <strong id="dbg-peer-status" class="text-amber-300">инициализация...</strong></span>
+                <span>Канал: <strong id="dbg-conn-status" class="text-amber-300">нет связи</strong></span>
+                <span>Картинка: <strong id="dbg-template-id" class="text-sky-300">-</strong></span>
+                <span>Секторов: <strong id="dbg-sectors-count" class="text-emerald-300">0</strong></span>
+            </div>
+        </section>
+
+    </main>
+
+    <script>
+        // =====================================================================
+        // 1. ШАБЛОНЫ РАСКРАСОК (5 шаблонов: rocket, cat, castle, parrot, sailboat)
+        // =====================================================================
+        const TEMPLATES = [
+            {
+                id: 'rocket',
+                title: 'Космическая ракета',
+                emoji: '🚀',
+                description: 'Полёт к далёким звёздам и планетам',
+                svg: `
+                <svg viewBox="0 0 400 400" class="coloring-svg" xmlns="http://www.w3.org/2000/svg">
+                    <rect data-sector="1" x="8" y="8" width="384" height="384" rx="24" fill="#ffffff" stroke="#1e293b" stroke-width="4"/>
+                    <circle data-sector="2" cx="82" cy="92" r="34" fill="#f8fafc" stroke="#1e293b" stroke-width="4"/>
+                    <ellipse data-sector="3" cx="82" cy="92" rx="60" ry="12" transform="rotate(-20 82 92)" fill="#ffffff" stroke="#1e293b" stroke-width="3.5"/>
+                    <circle data-sector="4" cx="322" cy="80" r="28" fill="#f8fafc" stroke="#1e293b" stroke-width="4"/>
+                    <polygon data-sector="5" points="318,175 325,192 343,192 329,203 334,220 318,210 302,220 307,203 293,192 311,192" fill="#ffffff" stroke="#1e293b" stroke-width="3.5"/>
+                    <polygon data-sector="6" points="72,245 78,259 93,259 81,268 85,282 72,273 59,282 63,268 51,259 66,259" fill="#ffffff" stroke="#1e293b" stroke-width="3.5"/>
+                    <path data-sector="7" d="M200 42 C164 88 155 124 155 140 L245 140 C245 124 236 88 200 42 Z" fill="#f8fafc" stroke="#1e293b" stroke-width="4"/>
+                    <path data-sector="8" d="M155 140 L245 140 L252 215 L148 215 Z" fill="#ffffff" stroke="#1e293b" stroke-width="4"/>
+                    <path data-sector="9" d="M148 215 L252 215 L240 285 L160 285 Z" fill="#f8fafc" stroke="#1e293b" stroke-width="4"/>
+                    <circle data-sector="10" cx="200" cy="182" r="30" fill="#ffffff" stroke="#1e293b" stroke-width="4"/>
+                    <circle data-sector="11" cx="200" cy="182" r="19" fill="#f8fafc" stroke="#1e293b" stroke-width="3.5"/>
+                    <path data-sector="12" d="M150 220 L102 280 L114 306 L156 275 Z" fill="#f8fafc" stroke="#1e293b" stroke-width="4"/>
+                    <path data-sector="13" d="M250 220 L298 280 L286 306 L244 275 Z" fill="#f8fafc" stroke="#1e293b" stroke-width="4"/>
+                    <path data-sector="14" d="M192 245 L208 245 L212 305 L188 305 Z" fill="#ffffff" stroke="#1e293b" stroke-width="4"/>
+                    <path data-sector="15" d="M168 285 C154 325 175 356 200 376 C225 356 246 325 232 285 Z" fill="#ffffff" stroke="#1e293b" stroke-width="4"/>
+                    <path data-sector="16" d="M182 285 C176 310 188 330 200 345 C212 330 224 310 218 285 Z" fill="#f8fafc" stroke="#1e293b" stroke-width="3.5"/>
+                </svg>`
+            },
+            {
+                id: 'cat',
+                title: 'Милый котик',
+                emoji: '🐱',
+                description: 'Пушистый котёнок с бантиком и клубком',
+                svg: `
+                <svg viewBox="0 0 400 400" class="coloring-svg" xmlns="http://www.w3.org/2000/svg">
+                    <rect data-sector="1" x="8" y="8" width="384" height="384" rx="24" fill="#ffffff" stroke="#1e293b" stroke-width="4"/>
+                    <polygon data-sector="2" points="115,135 105,52 170,95" fill="#f8fafc" stroke="#1e293b" stroke-width="4" stroke-linejoin="round"/>
+                    <polygon data-sector="3" points="123,122 117,72 156,98" fill="#ffffff" stroke="#1e293b" stroke-width="3"/>
+                    <polygon data-sector="4" points="285,135 295,52 230,95" fill="#f8fafc" stroke="#1e293b" stroke-width="4" stroke-linejoin="round"/>
+                    <polygon data-sector="5" points="277,122 283,72 244,98" fill="#ffffff" stroke="#1e293b" stroke-width="3"/>
+                    <path data-sector="6" d="M265 315 C325 315 350 265 330 235 C315 215 290 235 300 260 C308 278 285 290 260 290 Z" fill="#f8fafc" stroke="#1e293b" stroke-width="4"/>
+                    <path data-sector="7" d="M135 225 C115 265 115 335 145 350 L255 350 C285 335 285 265 265 225 Z" fill="#ffffff" stroke="#1e293b" stroke-width="4"/>
+                    <ellipse data-sector="8" cx="200" cy="295" rx="42" ry="48" fill="#f8fafc" stroke="#1e293b" stroke-width="3.5"/>
+                    <ellipse data-sector="9" cx="200" cy="155" rx="92" ry="74" fill="#ffffff" stroke="#1e293b" stroke-width="4"/>
+                    <circle data-sector="10" cx="165" cy="145" r="16" fill="#f8fafc" stroke="#1e293b" stroke-width="4"/>
+                    <circle data-sector="11" cx="235" cy="145" r="16" fill="#f8fafc" stroke="#1e293b" stroke-width="4"/>
+                    <polygon data-sector="12" points="190,168 210,168 200,180" fill="#ffffff" stroke="#1e293b" stroke-width="3.5" stroke-linejoin="round"/>
+                    <polygon data-sector="13" points="200,225 162,208 162,242" fill="#f8fafc" stroke="#1e293b" stroke-width="3.5" stroke-linejoin="round"/>
+                    <polygon data-sector="14" points="200,225 238,208 238,242" fill="#f8fafc" stroke="#1e293b" stroke-width="3.5" stroke-linejoin="round"/>
+                    <circle data-sector="15" cx="82" cy="322" r="34" fill="#ffffff" stroke="#1e293b" stroke-width="4"/>
+                    <path d="M185 186 Q200 196 200 180 Q200 196 215 186" fill="none" stroke="#1e293b" stroke-width="3.5" stroke-linecap="round" pointer-events="none"/>
+                    <path d="M135 162 L100 155 M135 172 L100 175 M265 162 L300 155 M265 172 L300 175" stroke="#1e293b" stroke-width="3" stroke-linecap="round" pointer-events="none"/>
+                </svg>`
+            },
+            {
+                id: 'castle',
+                title: 'Волшебный замок',
+                emoji: '🏰',
+                description: 'Сказочный дворец с башнями и флажками',
+                svg: `
+                <svg viewBox="0 0 400 400" class="coloring-svg" xmlns="http://www.w3.org/2000/svg">
+                    <rect data-sector="1" x="8" y="8" width="384" height="310" rx="22" fill="#ffffff" stroke="#1e293b" stroke-width="4"/>
+                    <path data-sector="2" d="M8 315 Q200 285 392 315 L392 372 Q392 392 372 392 L28 392 Q8 392 8 372 Z" fill="#f8fafc" stroke="#1e293b" stroke-width="4"/>
+                    <circle data-sector="3" cx="325" cy="70" r="30" fill="#ffffff" stroke="#1e293b" stroke-width="4"/>
+                    <path data-sector="4" d="M55 85 C42 85 35 72 45 62 C48 46 70 44 78 56 C90 48 110 56 108 72 C118 76 114 90 100 90 L55 90 Z" fill="#f8fafc" stroke="#1e293b" stroke-width="3.5"/>
+                    <rect data-sector="5" x="65" y="165" width="60" height="165" fill="#ffffff" stroke="#1e293b" stroke-width="4"/>
+                    <polygon data-sector="6" points="58,165 95,105 132,165" fill="#f8fafc" stroke="#1e293b" stroke-width="4" stroke-linejoin="round"/>
+                    <rect data-sector="7" x="275" y="165" width="60" height="165" fill="#ffffff" stroke="#1e293b" stroke-width="4"/>
+                    <polygon data-sector="8" points="268,165 305,105 342,165" fill="#f8fafc" stroke="#1e293b" stroke-width="4" stroke-linejoin="round"/>
+                    <rect data-sector="9" x="155" y="125" width="90" height="95" fill="#f8fafc" stroke="#1e293b" stroke-width="4"/>
+                    <polygon data-sector="10" points="148,125 200,55 252,125" fill="#ffffff" stroke="#1e293b" stroke-width="4" stroke-linejoin="round"/>
+                    <polygon data-sector="11" points="200,24 236,36 200,48" fill="#f8fafc" stroke="#1e293b" stroke-width="3.5"/>
+                    <rect data-sector="12" x="125" y="210" width="150" height="125" fill="#ffffff" stroke="#1e293b" stroke-width="4"/>
+                    <path data-sector="13" d="M172 335 L172 275 C172 252 228 252 228 275 L228 335 Z" fill="#f8fafc" stroke="#1e293b" stroke-width="4"/>
+                    <rect data-sector="14" x="85" y="195" width="20" height="32" rx="10" fill="#f8fafc" stroke="#1e293b" stroke-width="3.5"/>
+                    <rect data-sector="15" x="295" y="195" width="20" height="32" rx="10" fill="#f8fafc" stroke="#1e293b" stroke-width="3.5"/>
+                    <circle data-sector="16" cx="200" cy="165" r="18" fill="#ffffff" stroke="#1e293b" stroke-width="3.5"/>
+                </svg>`
+            },
+            {
+                id: 'parrot',
+                title: 'Тропический попугай',
+                emoji: '🦜',
+                description: 'Экзотический попугай в джунглях',
+                svg: `
+                <svg viewBox="0 0 400 400" class="coloring-svg" xmlns="http://www.w3.org/2000/svg">
+                    <rect data-sector="1" x="8" y="8" width="384" height="384" rx="24" fill="#ffffff" stroke="#1e293b" stroke-width="4"/>
+                    <path data-sector="2" d="M25 140 C65 110 110 125 125 165 C85 180 45 170 25 140 Z" fill="#f8fafc" stroke="#1e293b" stroke-width="4"/>
+                    <path data-sector="3" d="M375 110 C330 85 285 105 275 145 C315 155 355 140 375 110 Z" fill="#f8fafc" stroke="#1e293b" stroke-width="4"/>
+                    <path data-sector="4" d="M180 75 C165 40 135 35 130 55 C145 65 162 75 175 85 Z" fill="#ffffff" stroke="#1e293b" stroke-width="3.5"/>
+                    <path data-sector="5" d="M198 70 C195 32 168 20 158 38 C170 50 182 62 190 75 Z" fill="#f8fafc" stroke="#1e293b" stroke-width="3.5"/>
+                    <path data-sector="6" d="M215 72 C222 38 202 22 188 35 C195 48 202 62 206 75 Z" fill="#ffffff" stroke="#1e293b" stroke-width="3.5"/>
+                    <path data-sector="7" d="M180 285 L155 370 L185 375 L200 290 Z" fill="#f8fafc" stroke="#1e293b" stroke-width="4"/>
+                    <path data-sector="8" d="M205 290 L215 375 L245 368 L225 285 Z" fill="#ffffff" stroke="#1e293b" stroke-width="4"/>
+                    <path data-sector="9" d="M165 125 C165 82 235 82 240 130 C245 185 245 245 215 290 L180 290 C155 245 155 180 165 125 Z" fill="#ffffff" stroke="#1e293b" stroke-width="4"/>
+                    <circle data-sector="10" cx="205" cy="122" r="22" fill="#f8fafc" stroke="#1e293b" stroke-width="3.5"/>
+                    <path data-sector="11" d="M236 112 C272 110 282 135 268 152 C256 142 245 138 235 138 Z" fill="#ffffff" stroke="#1e293b" stroke-width="4"/>
+                    <path data-sector="12" d="M236 138 C252 138 262 148 254 158 C242 158 236 150 236 138 Z" fill="#f8fafc" stroke="#1e293b" stroke-width="3.5"/>
+                    <path data-sector="13" d="M168 165 C135 185 130 225 148 245 L205 225 C208 190 192 165 168 165 Z" fill="#f8fafc" stroke="#1e293b" stroke-width="4"/>
+                    <path data-sector="14" d="M148 245 C155 275 178 295 202 295 L205 225 Z" fill="#ffffff" stroke="#1e293b" stroke-width="4"/>
+                    <rect data-sector="15" x="45" y="285" width="310" height="22" rx="11" fill="#f8fafc" stroke="#1e293b" stroke-width="4"/>
+                    <circle cx="208" cy="120" r="6" fill="#1e293b" pointer-events="none"/>
+                </svg>`
+            },
+            {
+                id: 'sailboat',
+                title: 'Парусник на волнах',
+                emoji: '⛵',
+                description: 'Морское приключение под яркими парусами',
+                svg: `
+                <svg viewBox="0 0 400 400" class="coloring-svg" xmlns="http://www.w3.org/2000/svg">
+                    <rect data-sector="1" x="8" y="8" width="384" height="278" rx="22" fill="#ffffff" stroke="#1e293b" stroke-width="4"/>
+                    <circle data-sector="2" cx="85" cy="75" r="32" fill="#f8fafc" stroke="#1e293b" stroke-width="4"/>
+                    <path data-sector="3" d="M145 95 C132 95 128 80 140 72 C145 56 168 56 175 70 C188 66 200 78 194 92 L145 95 Z" fill="#f8fafc" stroke="#1e293b" stroke-width="3.5"/>
+                    <path data-sector="4" d="M290 78 C278 78 274 64 285 56 C290 42 312 42 318 55 C330 52 340 64 334 76 L290 78 Z" fill="#f8fafc" stroke="#1e293b" stroke-width="3.5"/>
+                    <polygon data-sector="5" points="205,42 248,54 205,66" fill="#ffffff" stroke="#1e293b" stroke-width="3.5"/>
+                    <path data-sector="6" d="M195 75 C140 120 115 175 110 225 L195 225 Z" fill="#f8fafc" stroke="#1e293b" stroke-width="4"/>
+                    <path data-sector="7" d="M210 75 C255 100 280 130 290 155 L210 155 Z" fill="#ffffff" stroke="#1e293b" stroke-width="4"/>
+                    <path data-sector="8" d="M210 155 L290 155 C298 185 298 210 292 225 L210 225 Z" fill="#f8fafc" stroke="#1e293b" stroke-width="4"/>
+                    <polygon data-sector="9" points="75,240 325,240 310,268 90,268" fill="#ffffff" stroke="#1e293b" stroke-width="4"/>
+                    <polygon data-sector="10" points="90,268 310,268 285,305 115,305" fill="#f8fafc" stroke="#1e293b" stroke-width="4"/>
+                    <circle data-sector="11" cx="155" cy="285" r="10" fill="#ffffff" stroke="#1e293b" stroke-width="3"/>
+                    <circle data-sector="12" cx="200" cy="285" r="10" fill="#ffffff" stroke="#1e293b" stroke-width="3"/>
+                    <circle data-sector="13" cx="245" cy="285" r="10" fill="#ffffff" stroke="#1e293b" stroke-width="3"/>
+                    <path data-sector="14" d="M8 295 Q60 278 110 295 T210 295 T310 295 T392 295 L392 345 L8 345 Z" fill="#f8fafc" stroke="#1e293b" stroke-width="4"/>
+                    <path data-sector="15" d="M8 335 Q70 315 130 335 T250 335 T392 335 L392 372 Q392 392 372 392 L28 392 Q8 392 8 372 Z" fill="#ffffff" stroke="#1e293b" stroke-width="4"/>
+                </svg>`
+            }
+        ];
+
+        const VALID_TEMPLATE_IDS = TEMPLATES.map(t => t.id);
+
+        function normalizeTemplateId(rawId) {
+            if (!rawId) return 'rocket';
+            const clean = String(rawId).toLowerCase().trim();
+            if (clean === 'ship') return 'sailboat';
+            return VALID_TEMPLATE_IDS.includes(clean) ? clean : 'rocket';
+        }
+
+        // =====================================================================
+        // 2. ПАЛИТРА ИЗ 16 ЦВЕТОВ (в ЧБ-режиме оттенки скрыты до нажатия «Готово!»)
+        // =====================================================================
+        const BASE_PALETTE = [
+            { id: 'c1', name: 'Алый красный', hex: '#ef4444' },
+            { id: 'c2', name: 'Сочный оранжевый', hex: '#f97316' },
+            { id: 'c3', name: 'Солнечный жёлтый', hex: '#eab308' },
+            { id: 'c4', name: 'Яркий лайм', hex: '#84cc16' },
+            { id: 'c5', name: 'Изумрудный зелёный', hex: '#10b981' },
+            { id: 'c6', name: 'Морская бирюза', hex: '#06b6d4' },
+            { id: 'c7', name: 'Небесно-голубой', hex: '#38bdf8' },
+            { id: 'c8', name: 'Васильковый синий', hex: '#3b82f6' },
+            { id: 'c9', name: 'Глубокий индиго', hex: '#6366f1' },
+            { id: 'c10', name: 'Королевский фиолетовый', hex: '#8b5cf6' },
+            { id: 'c11', name: 'Яркая фуксия', hex: '#d946ef' },
+            { id: 'c12', name: 'Нежно-розовый', hex: '#f43f5e' },
+            { id: 'c13', name: 'Шоколадный', hex: '#92400e' },
+            { id: 'c14', name: 'Персиковый', hex: '#fb923c' },
+            { id: 'c15', name: 'Мятный', hex: '#34d399' },
+            { id: 'c16', name: 'Лавандовый', hex: '#a78bfa' }
+        ];
+
+        const RANDOM_NAMES = [
+            'Алиса', 'Максим', 'София', 'Артём', 'Милана', 'Лев', 'Ева',
+            'Даниил', 'Полина', 'Тимур', 'Кира', 'Марк', 'Варвара', 'Илья', 'Арина'
+        ];
+
+        // Детерминированное перемешивание по seed для единой раскладки сессии
+        function shuffleWithSeed(arr, seed) {
+            const copy = [...arr];
+            let s = Number(seed) || 123456;
+            const rand = () => {
+                s = (s * 1664525 + 1013904223) % 4294967296;
+                return s / 4294967296;
+            };
+            for (let i = copy.length - 1; i > 0; i--) {
+                const j = Math.floor(rand() * (i + 1));
+                [copy[i], copy[j]] = [copy[j], copy[i]];
+            }
+            return copy;
+        }
+
+        // =====================================================================
+        // 3. СОСТОЯНИЕ И PEERJS (WEBRTC) СИНХРОНИЗАЦИЯ
+        // =====================================================================
+        const PEER_PREFIX = 'blind-color-room-';
+
+        const state = {
+            role: null, // 'teacher' | 'student'
+            roomCode: '',
+            studentName: '',
+            selectedTemplateId: 'rocket',
+            activeTemplateId: 'rocket',
+            paletteSeed: Math.floor(Math.random() * 900000) + 100000,
+            lessonStarted: false,
+
+            // PeerJS объекты
+            peer: null,
+            teacherConnections: [], // DataConnection[] на стороне учителя
+            studentConn: null,      // DataConnection на стороне ученика
+            reconnectTimer: null,
+
+            // Холст ученика
+            sectorColors: {},
+            totalSectors: 0,
+            shuffledPalette: [],
+            selectedColorHex: '#ef4444',
+            selectedColorIndex: 0,
+            isRevealed: false,
+
+            // Коллаж учителя
+            submissions: [],
+            heroIndex: 0,
+            slideshowTimer: 100,
+            slideshowPaused: false
+        };
+
+        function generate4DigitRoomCode() {
+            return String(Math.floor(1000 + Math.random() * 9000));
+        }
+
+        function setTopConnectionStatus(statusText, dotColorClass) {
+            const dot = document.getElementById('connection-dot');
+            const txt = document.getElementById('connection-text');
+            if (dot) dot.className = `w-2.5 h-2.5 rounded-full ${dotColorClass}`;
+            if (txt) txt.textContent = statusText;
+        }
+
+        function updateDebugBar(overrides = {}) {
+            const peerEl = document.getElementById('dbg-peer-status');
+            const connEl = document.getElementById('dbg-conn-status');
+            const tplEl = document.getElementById('dbg-template-id');
+            const secEl = document.getElementById('dbg-sectors-count');
+
+            if (overrides.peer && peerEl) peerEl.textContent = overrides.peer;
+            if (overrides.conn && connEl) connEl.textContent = overrides.conn;
+            if (tplEl) tplEl.textContent = state.activeTemplateId || '-';
+            if (secEl) secEl.textContent = String(state.totalSectors || 0);
+        }
+
+        function loadSubmissionsCache(roomCode) {
+            try {
+                const raw = localStorage.getItem(`blind_coloring_subs_${roomCode}`);
+                if (raw) {
+                    const parsed = JSON.parse(raw);
+                    if (Array.isArray(parsed)) state.submissions = parsed;
+                }
+            } catch (e) {
+                console.warn('Ошибка чтения кэша работ:', e);
+            }
+        }
+
+        function saveSubmissionsCache(roomCode) {
+            try {
+                localStorage.setItem(`blind_coloring_subs_${roomCode}`, JSON.stringify(state.submissions));
+            } catch (e) {
+                console.warn('Ошибка сохранения кэша работ:', e);
+            }
+        }
+
+        // Инициализация PeerJS для Учителя
+        function initTeacherPeer(roomCode) {
+            destroyPeer();
+            const peerId = `${PEER_PREFIX}${roomCode}`;
+            setTopConnectionStatus('Открытие комнаты...', 'bg-amber-400 animate-pulse');
+
+            try {
+                state.peer = new Peer(peerId, { debug: 0 });
+
+                state.peer.on('open', (id) => {
+                    setTopConnectionStatus('Комната активна', 'bg-emerald-500');
+                    showToast(`Комната ${roomCode} готова! Ученики могут подключаться.`, 'success');
+                });
+
+                state.peer.on('connection', (conn) => {
+                    state.teacherConnections.push(conn);
+                    updateConnectedStudentsCount();
+
+                    // Сразу при открытии канала отправляем новому ученику актуальное состояние
+                    conn.on('open', () => {
+                        updateConnectedStudentsCount();
+                        const tplId = normalizeTemplateId(state.activeTemplateId || state.selectedTemplateId);
+                        conn.send({
+                            type: 'sync_state',
+                            started: Boolean(state.lessonStarted),
+                            templateId: tplId,
+                            paletteSeed: state.paletteSeed,
+                            timestamp: Date.now()
+                        });
+                    });
+
+                    conn.on('data', (msg) => {
+                        if (!msg || typeof msg !== 'object') return;
+
+                        // Ученик запрашивает актуальное состояние (например, после открытия экрана)
+                        if (msg.type === 'request_sync') {
+                            const tplId = normalizeTemplateId(state.activeTemplateId || state.selectedTemplateId);
+                            conn.send({
+                                type: 'sync_state',
+                                started: Boolean(state.lessonStarted),
+                                templateId: tplId,
+                                paletteSeed: state.paletteSeed,
+                                timestamp: Date.now()
+                            });
+                        }
+
+                        // Ученик прислал готовую раскрашенную работу
+                        if (msg.type === 'submit_work' && msg.submission) {
+                            const sub = {
+                                ...msg.submission,
+                                id: msg.submission.id || ('work_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6)),
+                                templateId: normalizeTemplateId(msg.submission.templateId)
+                            };
+                            addSubmissionToCollage(sub);
+
+                            // Подтверждаем ученику успешную доставку
+                            if (conn.open) {
+                                conn.send({ type: 'work_received', workId: sub.id });
+                            }
+                            showToast(`🎨 ${sub.studentName} прислал(а) работу!`, 'success');
+                        }
+                    });
+
+                    const cleanupConn = () => {
+                        state.teacherConnections = state.teacherConnections.filter(c => c !== conn);
+                        updateConnectedStudentsCount();
+                    };
+                    conn.on('close', cleanupConn);
+                    conn.on('error', cleanupConn);
+                });
+
+                state.peer.on('disconnected', () => {
+                    setTopConnectionStatus('Переподключение...', 'bg-amber-400 animate-pulse');
+                    schedulePeerReconnect();
+                });
+
+                state.peer.on('error', (err) => {
+                    console.error('Peer ошибка (учитель):', err);
+                    setTopConnectionStatus('Ошибка сети PeerJS', 'bg-rose-500');
+                    if (err.type === 'unavailable-id') {
+                        showToast('Этот код комнаты уже занят, генерируем новый...', 'info');
+                        state.roomCode = generate4DigitRoomCode();
+                        updateTeacherRoomUI();
+                        initTeacherPeer(state.roomCode);
+                    } else {
+                        schedulePeerReconnect();
+                    }
+                });
+            } catch (err) {
+                console.error('Ошибка создания Peer учителя:', err);
+                setTopConnectionStatus('Ошибка WebRTC', 'bg-rose-500');
+            }
+        }
+
+        // Инициализация PeerJS для Ученика
+        function initStudentPeer(roomCode) {
+            destroyPeer();
+            const targetTeacherPeerId = `${PEER_PREFIX}${roomCode}`;
+            setTopConnectionStatus('Подключение к учителю...', 'bg-amber-400 animate-pulse');
+            updateDebugBar({ peer: 'создание...', conn: 'подключение...' });
+
+            try {
+                state.peer = new Peer(undefined, { debug: 0 });
+
+                state.peer.on('open', (id) => {
+                    updateDebugBar({ peer: `онлайн (${id.slice(0, 6)})` });
+                    connectStudentToTeacher(targetTeacherPeerId);
+                });
+
+                state.peer.on('disconnected', () => {
+                    setTopConnectionStatus('Переподключение...', 'bg-amber-400 animate-pulse');
+                    updateDebugBar({ peer: 'отключён, повтор...', conn: 'нет связи' });
+                    schedulePeerReconnect(() => connectStudentToTeacher(targetTeacherPeerId));
+                });
+
+                state.peer.on('error', (err) => {
+                    console.error('Peer ошибка (ученик):', err);
+                    setTopConnectionStatus('Поиск учителя...', 'bg-amber-400 animate-pulse');
+                    updateDebugBar({ peer: `ошибка: ${err.type || 'сети'}`, conn: 'повтор...' });
+                    schedulePeerReconnect(() => connectStudentToTeacher(targetTeacherPeerId));
+                });
+            } catch (err) {
+                console.error('Ошибка создания Peer ученика:', err);
+                updateDebugBar({ peer: 'ошибка инициализации', conn: 'нет связи' });
+            }
+        }
+
+        function connectStudentToTeacher(targetTeacherPeerId) {
+            if (!state.peer || state.peer.destroyed) return;
+            try {
+                const conn = state.peer.connect(targetTeacherPeerId, { reliable: true });
+                state.studentConn = conn;
+
+                conn.on('open', () => {
+                    setTopConnectionStatus('Связано с учителем', 'bg-emerald-500');
+                    updateDebugBar({ conn: 'открыт (connected)' });
+                    // Запрашиваем актуальное состояние урока сразу при открытии канала
+                    conn.send({
+                        type: 'request_sync',
+                        studentName: state.studentName,
+                        timestamp: Date.now()
+                    });
+                });
+
+                conn.on('data', (msg) => {
+                    if (!msg || typeof msg !== 'object') return;
+                    handleStudentIncomingMessage(msg);
+                });
+
+                conn.on('close', () => {
+                    setTopConnectionStatus('Связь прервана', 'bg-amber-400');
+                    updateDebugBar({ conn: 'закрыт' });
+                    schedulePeerReconnect(() => connectStudentToTeacher(targetTeacherPeerId));
+                });
+
+                conn.on('error', (err) => {
+                    console.error('Ошибка канала ученика:', err);
+                    updateDebugBar({ conn: 'ошибка канала' });
+                    schedulePeerReconnect(() => connectStudentToTeacher(targetTeacherPeerId));
+                });
+            } catch (err) {
+                console.error('Ошибка при conn():', err);
+            }
+        }
+
+        // Обработка входящих сообщений от учителя на стороне ученика
+        function handleStudentIncomingMessage(msg) {
+            if (msg.type === 'start_coloring' || msg.type === 'sync_state') {
+                const normId = normalizeTemplateId(msg.templateId);
+                if (typeof msg.paletteSeed === 'number') {
+                    state.paletteSeed = msg.paletteSeed;
+                }
+
+                const shouldStart = (msg.type === 'start_coloring') || Boolean(msg.started);
+                if (shouldStart) {
+                    state.lessonStarted = true;
+                    startStudentColoringSession(normId, state.paletteSeed);
+                } else {
+                    // Учитель пока в режиме ожидания — запоминаем выбранный им шаблон и просим запуск
+                    state.activeTemplateId = normId;
+                    updateDebugBar({ template: `${normId} (ожидание старта)` });
+                }
+            } else if (msg.type === 'work_received') {
+                const statusEl = document.getElementById('delivery-status-text');
+                if (statusEl) {
+                    statusEl.textContent = '✅ Учитель получил твою работу и добавил в коллаж!';
+                }
+            }
+        }
+
+        function schedulePeerReconnect(actionFn) {
+            if (state.reconnectTimer) clearTimeout(state.reconnectTimer);
+            state.reconnectTimer = setTimeout(() => {
+                if (!state.role) return;
+                if (state.peer && !state.peer.destroyed && state.peer.disconnected) {
+                    try { state.peer.reconnect(); } catch (e) {}
+                }
+                if (typeof actionFn === 'function') {
+                    actionFn();
+                }
+            }, 2500);
+        }
+
+        function destroyPeer() {
+            if (state.reconnectTimer) {
+                clearTimeout(state.reconnectTimer);
+                state.reconnectTimer = null;
+            }
+            if (state.studentConn) {
+                try { state.studentConn.close(); } catch (e) {}
+                state.studentConn = null;
+            }
+            state.teacherConnections = [];
+            if (state.peer) {
+                try { state.peer.destroy(); } catch (e) {}
+                state.peer = null;
+            }
+        }
+
+        function updateConnectedStudentsCount() {
+            const openCount = state.teacherConnections.filter(c => c.open).length;
+            const el = document.getElementById('connected-students-count');
+            if (el) el.textContent = String(openCount);
+        }
+
+        // =====================================================================
+        // 4. НАВИГАЦИЯ И ВЫБОР РОЛЕЙ
+        // =====================================================================
+        function switchMainView(viewId) {
+            ['view-landing', 'view-teacher', 'view-student'].forEach(id => {
+                const el = document.getElementById(id);
+                if (el) el.classList.toggle('is-active', id === viewId);
+            });
+        }
+
+        function setStudentSubView(subView) {
+            const waitingEl = document.getElementById('student-waiting');
+            const coloringEl = document.getElementById('student-coloring');
+            if (!waitingEl || !coloringEl) return;
+
+            if (subView === 'coloring') {
+                waitingEl.classList.remove('is-active');
+                coloringEl.classList.add('is-active');
+            } else {
+                coloringEl.classList.remove('is-active');
+                waitingEl.classList.add('is-active');
+            }
+        }
+
+        function updateHeaderUI() {
+            const roleBadge = document.getElementById('header-role-badge');
+            const roomPill = document.getElementById('room-code-pill');
+            const btnChange = document.getElementById('btn-change-role');
+            const roomCodeEl = document.getElementById('header-room-code');
+
+            if (!state.role) {
+                roleBadge.classList.add('hidden');
+                roomPill.classList.add('hidden');
+                roomPill.classList.remove('flex');
+                btnChange.classList.add('hidden');
+            } else {
+                roleBadge.classList.remove('hidden');
+                roleBadge.textContent = state.role === 'teacher' ? '👩‍🏫 Учитель' : `🎨 Ученик: ${state.studentName}`;
+                roomPill.classList.remove('hidden');
+                roomPill.classList.add('flex');
+                roomCodeEl.textContent = state.roomCode;
+                btnChange.classList.remove('hidden');
+            }
+        }
+
+        function enterAsTeacher() {
+            state.role = 'teacher';
+            state.roomCode = state.roomCode || generate4DigitRoomCode();
+            state.lessonStarted = false;
+            state.selectedTemplateId = normalizeTemplateId(state.selectedTemplateId);
+            state.activeTemplateId = state.selectedTemplateId;
+
+            loadSubmissionsCache(state.roomCode);
+            updateHeaderUI();
+            updateTeacherRoomUI();
+            updateTeacherStatusBadge();
+            renderTeacherTemplates();
+            renderCollage();
+            switchMainView('view-teacher');
+            initTeacherPeer(state.roomCode);
+        }
+
+        function enterAsStudent() {
+            const nameInput = document.getElementById('student-name-input').value.trim();
+            const roomInput = document.getElementById('student-room-input').value.trim().toUpperCase();
+
+            if (!roomInput) {
+                showToast('Введите 4-значный код комнаты от учителя', 'error');
+                document.getElementById('student-room-input').focus();
+                return;
+            }
+
+            state.role = 'student';
+            state.studentName = nameInput || getRandomName();
+            state.roomCode = roomInput;
+            state.lessonStarted = false;
+
+            document.getElementById('waiting-room-code').textContent = state.roomCode;
+            document.getElementById('waiting-student-name').textContent = state.studentName;
+
+            updateHeaderUI();
+            setStudentSubView('waiting');
+            switchMainView('view-student');
+            updateDebugBar({ peer: 'запуск...', conn: 'подключение...' });
+            initStudentPeer(state.roomCode);
+        }
+
+        function goHome() {
+            destroyPeer();
+            state.role = null;
+            state.lessonStarted = false;
+            updateHeaderUI();
+            setTopConnectionStatus('Готово', 'bg-slate-400');
+            switchMainView('view-landing');
+        }
+
+        function confirmGoHome() {
+            if (!state.role) {
+                switchMainView('view-landing');
+                return;
+            }
+            showConfirmModal(
+                'Выйти из комнаты?',
+                'Текущее P2P-соединение будет закрыто, и вы вернётесь на главный экран.',
+                () => goHome()
+            );
+        }
+
+        function getRandomName() {
+            return RANDOM_NAMES[Math.floor(Math.random() * RANDOM_NAMES.length)];
+        }
+
+        function fillRandomStudentName() {
+            document.getElementById('student-name-input').value = getRandomName();
+        }
+
+        function copyRoomCode() {
+            if (!state.roomCode) return;
+            copyTextToClipboard(state.roomCode, `Код комнаты ${state.roomCode} скопирован!`);
+        }
+
+        function buildInviteUrl() {
+            const url = new URL(window.location.href);
+            url.searchParams.set('room', state.roomCode);
+            return url.toString();
+        }
+
+        function copyInviteLink() {
+            const link = buildInviteUrl();
+            copyTextToClipboard(link, 'Ссылка для входа учеников скопирована!');
+        }
+
+        function copyTextToClipboard(text, successMsg) {
+            const temp = document.createElement('input');
+            temp.value = text;
+            document.body.appendChild(temp);
+            temp.select();
+            document.execCommand('copy');
+            document.body.removeChild(temp);
+            showToast(successMsg, 'success');
+        }
+
+        // =====================================================================
+        // 5. ЛОГИКА УЧИТЕЛЯ: QR-КОД, ЗАПУСК УРОКА И КОЛЛАЖ
+        // =====================================================================
+        function updateTeacherRoomUI() {
+            document.getElementById('teacher-room-code-display').textContent = state.roomCode;
+            const inviteUrl = buildInviteUrl();
+            document.getElementById('teacher-invite-link').value = inviteUrl;
+
+            const qrBox = document.getElementById('teacher-qr-box');
+            qrBox.innerHTML = '';
+            if (typeof QRCode !== 'undefined') {
+                try {
+                    new QRCode(qrBox, {
+                        text: inviteUrl,
+                        width: 104,
+                        height: 104,
+                        colorDark: '#1e1b4b',
+                        colorLight: '#ffffff',
+                        correctLevel: QRCode.CorrectLevel.M
+                    });
+                } catch (e) {
+                    qrBox.innerHTML = '<span class="text-xs font-bold text-slate-400">QR</span>';
+                }
+            }
+        }
+
+        function updateTeacherStatusBadge() {
+            const badge = document.getElementById('teacher-lesson-status');
+            if (!badge) return;
+            if (state.lessonStarted) {
+                const tpl = TEMPLATES.find(t => t.id === state.activeTemplateId) || TEMPLATES[0];
+                badge.className = 'px-3 py-1 rounded-full text-xs font-extrabold bg-emerald-100 text-emerald-800';
+                badge.textContent = `🟢 Урок запущен: ${tpl.emoji} ${tpl.title}`;
+            } else {
+                badge.className = 'px-3 py-1 rounded-full text-xs font-extrabold bg-amber-100 text-amber-800';
+                badge.textContent = '⏳ Ожидание запуска';
+            }
+        }
+
+        function renderTeacherTemplates() {
+            const grid = document.getElementById('teacher-templates-grid');
+            grid.innerHTML = '';
+
+            TEMPLATES.forEach(tpl => {
+                const isSelected = tpl.id === state.selectedTemplateId;
+                const card = document.createElement('button');
+                card.type = 'button';
+                card.className = `cursor-pointer rounded-2xl p-3 border-2 transition-all flex flex-col items-center text-center ${
+                    isSelected
+                        ? 'border-indigo-600 bg-indigo-50/80 shadow-md scale-[1.02]'
+                        : 'border-slate-200 bg-white hover:border-indigo-300 hover:bg-slate-50'
+                }`;
+                card.onclick = () => {
+                    state.selectedTemplateId = tpl.id;
+                    // Сразу синхронизируем выбранную картинку с подключёнными учениками, если урок уже шёл
+                    renderTeacherTemplates();
+                    if (state.lessonStarted) {
+                        broadcastTemplateStart(tpl.id, false);
+                    }
+                };
+
+                card.innerHTML = `
+                    <div class="w-full aspect-square bg-white rounded-xl p-2 mb-2.5 border border-slate-100 flex items-center justify-center overflow-hidden pointer-events-none">
+                        ${tpl.svg}
+                    </div>
+                    <div class="font-extrabold text-sm text-slate-900">${tpl.emoji} ${tpl.title}</div>
+                    <div class="text-[11px] text-slate-500 mt-0.5 line-clamp-1">${tpl.description}</div>
+                    ${isSelected ? '<span class="mt-2 px-2.5 py-0.5 rounded-full text-[10px] font-black bg-indigo-600 text-white">Выбрано</span>' : ''}
+                `;
+                grid.appendChild(card);
+            });
+        }
+
+        function broadcastTemplateStart(templateId, showNotification = true) {
+            const normId = normalizeTemplateId(templateId);
+            state.selectedTemplateId = normId;
+            state.activeTemplateId = normId;
+            state.lessonStarted = true;
+            state.paletteSeed = Math.floor(Math.random() * 900000) + 100000;
+
+            updateTeacherStatusBadge();
+
+            const payload = {
+                type: 'start_coloring',
+                started: true,
+                templateId: normId,
+                paletteSeed: state.paletteSeed,
+                timestamp: Date.now()
+            };
+
+            let sentCount = 0;
+            state.teacherConnections.forEach(conn => {
+                if (conn && conn.open) {
+                    try {
+                        conn.send(payload);
+                        sentCount++;
+                    } catch (e) {
+                        console.error('Ошибка отправки ученику:', e);
+                    }
+                }
+            });
+
+            if (showNotification) {
+                const tpl = TEMPLATES.find(t => t.id === normId) || TEMPLATES[0];
+                showToast(`🚀 «${tpl.title}» отправлена ученикам (${sentCount} подключено)`, 'success');
+            }
+        }
+
+        function launchTemplateForClass() {
+            const tplId = normalizeTemplateId(state.selectedTemplateId || 'rocket');
+            broadcastTemplateStart(tplId, true);
+        }
+
+        function resendTemplateToAllStudents() {
+            const tplId = normalizeTemplateId(state.activeTemplateId || state.selectedTemplateId || 'rocket');
+            state.activeTemplateId = tplId;
+            state.lessonStarted = true;
+            updateTeacherStatusBadge();
+
+            const payload = {
+                type: 'start_coloring',
+                started: true,
+                templateId: tplId,
+                paletteSeed: state.paletteSeed,
+                timestamp: Date.now()
+            };
+
+            let sentCount = 0;
+            state.teacherConnections.forEach(conn => {
+                if (conn && conn.open) {
+                    try {
+                        conn.send(payload);
+                        sentCount++;
+                    } catch (e) {}
+                }
+            });
+
+            const tpl = TEMPLATES.find(t => t.id === tplId) || TEMPLATES[0];
+            showToast(`🔄 Картинка «${tpl.title}» повторно отправлена (${sentCount} ученикам)`, 'info');
+        }
+
+        function buildColoredSvgString(templateId, sectorColors) {
+            const normId = normalizeTemplateId(templateId);
+            const tpl = TEMPLATES.find(t => t.id === normId) || TEMPLATES[0];
+            const parser = new DOMParser();
+            const docSvg = parser.parseFromString(tpl.svg, 'image/svg+xml');
+            const svgEl = docSvg.querySelector('svg');
+            svgEl.classList.remove('coloring-svg');
+            svgEl.setAttribute('width', '100%');
+            svgEl.setAttribute('height', '100%');
+
+            const sectors = svgEl.querySelectorAll('[data-sector]');
+            sectors.forEach(sec => {
+                const id = sec.getAttribute('data-sector');
+                if (sectorColors && sectorColors[id]) {
+                    sec.setAttribute('fill', sectorColors[id]);
+                }
+            });
+
+            return svgEl.outerHTML;
+        }
+
+        function addSubmissionToCollage(sub) {
+            state.submissions.unshift(sub);
+            state.heroIndex = 0;
+            state.slideshowTimer = 100;
+            saveSubmissionsCache(state.roomCode);
+            if (state.role === 'teacher') {
+                renderCollage();
+            }
+        }
+
+        function addDemoSubmission() {
+            const normId = normalizeTemplateId(state.selectedTemplateId || state.activeTemplateId || 'rocket');
+            const tpl = TEMPLATES.find(t => t.id === normId) || TEMPLATES[0];
+            const demoColors = {};
+            for (let i = 1; i <= 18; i++) {
+                demoColors[String(i)] = BASE_PALETTE[Math.floor(Math.random() * BASE_PALETTE.length)].hex;
+            }
+
+            const sub = {
+                id: 'demo_' + Date.now() + '_' + Math.random().toString(36).slice(2, 5),
+                studentName: `${getRandomName()} (демо)`,
+                templateId: tpl.id,
+                templateTitle: tpl.title,
+                sectorColors: demoColors,
+                createdAt: Date.now()
+            };
+
+            addSubmissionToCollage(sub);
+            showToast(`✨ Добавлена демо-работа: ${sub.studentName}`, 'success');
+        }
+
+        function confirmClearSubmissions() {
+            if (state.submissions.length === 0) return;
+            showConfirmModal(
+                'Очистить коллаж?',
+                'Все работы учеников в текущей комнате будут удалены из коллажа.',
+                () => {
+                    state.submissions = [];
+                    state.heroIndex = 0;
+                    saveSubmissionsCache(state.roomCode);
+                    renderCollage();
+                    showToast('Коллаж очищен', 'info');
+                }
+            );
+        }
+
+        function renderCollage() {
+            const countEl = document.getElementById('submissions-count');
+            const emptyState = document.getElementById('collage-empty-state');
+            const activeContainer = document.getElementById('collage-active-container');
+
+            countEl.textContent = String(state.submissions.length);
+
+            if (state.submissions.length === 0) {
+                emptyState.classList.remove('hidden');
+                activeContainer.classList.remove('is-active');
+                return;
+            }
+
+            emptyState.classList.add('hidden');
+            activeContainer.classList.add('is-active');
+
+            if (state.heroIndex >= state.submissions.length) {
+                state.heroIndex = 0;
+            }
+
+            const heroWork = state.submissions[state.heroIndex];
+            document.getElementById('hero-work-author').textContent = heroWork.studentName;
+            document.getElementById('hero-work-template').textContent = heroWork.templateTitle || 'Раскраска';
+            document.getElementById('hero-work-time').textContent = formatTimeAgo(heroWork.createdAt);
+
+            const heroCanvas = document.getElementById('hero-work-canvas');
+            heroCanvas.innerHTML = buildColoredSvgString(heroWork.templateId, heroWork.sectorColors);
+            heroCanvas.classList.remove('collage-hero-enter');
+            void heroCanvas.offsetWidth;
+            heroCanvas.classList.add('collage-hero-enter');
+
+            const thumbsGrid = document.getElementById('collage-thumbnails-grid');
+            thumbsGrid.innerHTML = '';
+
+            state.submissions.forEach((work, idx) => {
+                const isHero = idx === state.heroIndex;
+                const card = document.createElement('button');
+                card.type = 'button';
+                card.className = `cursor-pointer rounded-2xl p-2.5 border-2 transition-all bg-white flex flex-col text-left ${
+                    isHero
+                        ? 'border-indigo-600 ring-2 ring-indigo-200 shadow-md'
+                        : 'border-slate-200 hover:border-indigo-300 opacity-90 hover:opacity-100'
+                }`;
+                card.onclick = () => {
+                    state.heroIndex = idx;
+                    state.slideshowTimer = 100;
+                    renderCollage();
+                };
+
+                card.innerHTML = `
+                    <div class="w-full aspect-square bg-slate-50 rounded-xl p-1.5 mb-2 flex items-center justify-center overflow-hidden pointer-events-none">
+                        ${buildColoredSvgString(work.templateId, work.sectorColors)}
+                    </div>
+                    <div class="flex items-center justify-between gap-1 w-full">
+                        <span class="font-extrabold text-xs text-slate-800 truncate">${work.studentName}</span>
+                        ${isHero ? '<span class="w-2 h-2 rounded-full bg-indigo-600 shrink-0"></span>' : ''}
+                    </div>
+                `;
+                thumbsGrid.appendChild(card);
+            });
+        }
+
+        function nextHeroWork() {
+            if (state.submissions.length <= 1) {
+                state.slideshowTimer = 100;
+                return;
+            }
+            state.heroIndex = (state.heroIndex + 1) % state.submissions.length;
+            state.slideshowTimer = 100;
+            renderCollage();
+        }
+
+        function toggleSlideshowPause() {
+            state.slideshowPaused = !state.slideshowPaused;
+            const btn = document.getElementById('btn-pause-slideshow');
+            if (btn) {
+                btn.textContent = state.slideshowPaused ? '▶ Продолжить' : '⏸ Пауза (10с)';
+            }
+        }
+
+        // Автосмена главной работы каждые 10 секунд
+        setInterval(() => {
+            if (state.role !== 'teacher' || state.submissions.length <= 1 || state.slideshowPaused) {
+                const bar = document.getElementById('slideshow-progress-bar');
+                if (bar) bar.style.width = '100%';
+                return;
+            }
+
+            state.slideshowTimer -= 1; // 100 шагов по 100мс = 10 секунд
+            const bar = document.getElementById('slideshow-progress-bar');
+            if (bar) bar.style.width = `${Math.max(0, state.slideshowTimer)}%`;
+
+            if (state.slideshowTimer <= 0) {
+                nextHeroWork();
+            }
+        }, 100);
+
+        // =====================================================================
+        // 6. ЛОГИКА УЧЕНИКА: СТАРТ СЕССИИ, Ч/Б ФИЛЬТР И ОТПРАВКА РАБОТЫ
+        // =====================================================================
+        function requestSyncFromTeacher() {
+            if (state.studentConn && state.studentConn.open) {
+                state.studentConn.send({ type: 'request_sync', studentName: state.studentName });
+                showToast('Запрос отправлен учителю...', 'info');
+            } else {
+                const targetId = `${PEER_PREFIX}${state.roomCode}`;
+                connectStudentToTeacher(targetId);
+                showToast('Повторное подключение к комнате...', 'info');
+            }
+        }
+
+        function forceOpenFallbackTemplate() {
+            state.lessonStarted = true;
+            startStudentColoringSession('rocket', state.paletteSeed);
+        }
+
+        function startStudentColoringSession(templateId, seed) {
+            const normId = normalizeTemplateId(templateId);
+            state.activeTemplateId = normId;
+            state.paletteSeed = seed || state.paletteSeed;
+            state.sectorColors = {};
+            state.isRevealed = false;
+
+            // Сначала переключаем контейнер раскраски в видимое состояние, затем рендерим SVG и палитру
+            setStudentSubView('coloring');
+
+            requestAnimationFrame(() => {
+                applySeededPalette(state.paletteSeed);
+                renderStudentSvgCanvas(normId);
+                updateDebugBar({ template: normId });
+            });
+        }
+
+        function applySeededPalette(seed) {
+            state.shuffledPalette = shuffleWithSeed(BASE_PALETTE, seed);
+            state.selectedColorIndex = 0;
+            state.selectedColorHex = state.shuffledPalette[0].hex;
+            renderStudentPalette();
+        }
+
+        function shufflePalette() {
+            state.paletteSeed = Math.floor(Math.random() * 900000) + 100000;
+            applySeededPalette(state.paletteSeed);
+        }
+
+        function renderStudentPalette() {
+            const grid = document.getElementById('palette-grid');
+            grid.innerHTML = '';
+
+            state.shuffledPalette.forEach((colorObj, idx) => {
+                const isSelected = idx === state.selectedColorIndex;
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = `aspect-square rounded-full transition-all flex items-center justify-center relative shadow-md ${
+                    isSelected
+                        ? 'scale-110 ring-4 ring-slate-900 z-10'
+                        : 'hover:scale-105 opacity-95'
+                }`;
+                btn.style.backgroundColor = colorObj.hex;
+                btn.onclick = () => {
+                    state.selectedColorHex = colorObj.hex;
+                    state.selectedColorIndex = idx;
+                    renderStudentPalette();
+                };
+
+                if (isSelected) {
+                    btn.innerHTML = `<span class="w-3.5 h-3.5 rounded-full bg-white shadow"></span>`;
+                }
+                grid.appendChild(btn);
+            });
+
+            const preview = document.getElementById('selected-brush-preview');
+            const label = document.getElementById('selected-brush-label');
+            preview.style.backgroundColor = state.selectedColorHex;
+
+            if (state.isRevealed) {
+                const activeColorObj = state.shuffledPalette[state.selectedColorIndex];
+                label.textContent = activeColorObj ? activeColorObj.name : 'Цвет открыт';
+            } else {
+                label.textContent = `Загадочный оттенок #${state.selectedColorIndex + 1}`;
+            }
+        }
+
+        function renderStudentSvgCanvas(templateId) {
+            const tpl = TEMPLATES.find(t => t.id === templateId) || TEMPLATES[0];
+            document.getElementById('student-template-title').textContent = `${tpl.emoji} ${tpl.title}`;
+
+            const canvasWrap = document.getElementById('student-canvas-wrapper');
+            const paletteWrap = document.getElementById('student-palette-wrapper');
+            const brushPreview = document.getElementById('selected-brush-preview');
+            const blindBadge = document.getElementById('blind-mode-badge');
+
+            // Включаем ЧБ-фильтр
+            canvasWrap.classList.remove('blind-filter-revealed');
+            canvasWrap.classList.add('blind-filter');
+            paletteWrap.classList.remove('blind-filter-revealed');
+            paletteWrap.classList.add('blind-filter');
+            brushPreview.classList.remove('blind-filter-revealed');
+            brushPreview.classList.add('blind-filter');
+
+            blindBadge.innerHTML = '<span>👁️‍🗨️ Режим «Слепая палитра»: цвета скрыты</span>';
+            blindBadge.className = 'mb-4 px-4 py-1.5 rounded-full bg-slate-800 text-white text-xs font-extrabold tracking-wide flex items-center gap-2 shadow';
+
+            document.getElementById('ready-action-area').classList.add('hidden');
+            document.getElementById('revealed-action-area').classList.add('hidden');
+            document.getElementById('palette-subtitle').textContent = '16 цветов перемешаны под ЧБ-фильтром';
+
+            canvasWrap.innerHTML = tpl.svg;
+            const sectors = canvasWrap.querySelectorAll('[data-sector]');
+            state.totalSectors = sectors.length;
+
+            sectors.forEach(sec => {
+                sec.addEventListener('click', () => {
+                    const secId = sec.getAttribute('data-sector');
+                    sec.setAttribute('fill', state.selectedColorHex);
+                    state.sectorColors[secId] = state.selectedColorHex;
+                    updateStudentProgress();
+                });
+            });
+
+            updateDebugBar({ sectors: String(state.totalSectors), template: tpl.id });
+            updateStudentProgress();
+        }
+
+        function updateStudentProgress() {
+            const filledCount = Object.keys(state.sectorColors).length;
+            const total = state.totalSectors;
+            const percent = total > 0 ? Math.round((filledCount / total) * 100) : 0;
+
+            document.getElementById('progress-filled').textContent = String(filledCount);
+            document.getElementById('progress-total').textContent = String(total);
+            document.getElementById('progress-percent').textContent = `${percent}%`;
+
+            if (filledCount >= total && total > 0 && !state.isRevealed) {
+                document.getElementById('ready-action-area').classList.remove('hidden');
+            }
+        }
+
+        function autoFillRemainingForTest() {
+            const canvasWrap = document.getElementById('student-canvas-wrapper');
+            const sectors = canvasWrap.querySelectorAll('[data-sector]');
+            sectors.forEach(sec => {
+                const secId = sec.getAttribute('data-sector');
+                if (!state.sectorColors[secId]) {
+                    const randColor = state.shuffledPalette[Math.floor(Math.random() * state.shuffledPalette.length)].hex;
+                    sec.setAttribute('fill', randColor);
+                    state.sectorColors[secId] = randColor;
+                }
+            });
+            updateStudentProgress();
+        }
+
+        function revealAndSubmitWork() {
+            if (state.isRevealed) return;
+            state.isRevealed = true;
+
+            const canvasWrap = document.getElementById('student-canvas-wrapper');
+            const paletteWrap = document.getElementById('student-palette-wrapper');
+            const brushPreview = document.getElementById('selected-brush-preview');
+            const blindBadge = document.getElementById('blind-mode-badge');
+
+            // Снимаем ЧБ-фильтр — проявляются настоящие цвета!
+            canvasWrap.classList.remove('blind-filter');
+            canvasWrap.classList.add('blind-filter-revealed');
+            paletteWrap.classList.remove('blind-filter');
+            paletteWrap.classList.add('blind-filter-revealed');
+            brushPreview.classList.remove('blind-filter');
+            brushPreview.classList.add('blind-filter-revealed');
+
+            blindBadge.innerHTML = '<span>🌈 Настоящие цвета раскрыты!</span>';
+            blindBadge.className = 'mb-4 px-4 py-1.5 rounded-full bg-gradient-to-r from-pink-500 to-amber-500 text-white text-xs font-extrabold tracking-wide flex items-center gap-2 shadow';
+
+            document.getElementById('ready-action-area').classList.add('hidden');
+            document.getElementById('revealed-action-area').classList.remove('hidden');
+            document.getElementById('palette-subtitle').textContent = 'Настоящие цвета открыты!';
+
+            renderStudentPalette();
+            launchConfetti();
+
+            const tpl = TEMPLATES.find(t => t.id === state.activeTemplateId) || TEMPLATES[0];
+            const submissionPayload = {
+                id: 'sub_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+                studentName: state.studentName,
+                templateId: tpl.id,
+                templateTitle: tpl.title,
+                sectorColors: { ...state.sectorColors },
+                createdAt: Date.now()
+            };
+
+            const statusEl = document.getElementById('delivery-status-text');
+            if (state.studentConn && state.studentConn.open) {
+                try {
+                    state.studentConn.send({ type: 'submit_work', submission: submissionPayload });
+                    statusEl.textContent = '✅ Работа отправлена учителю в коллаж!';
+                    showToast('🎉 Рисунок отправлен учителю!', 'success');
+                } catch (e) {
+                    statusEl.textContent = '⚠️ Не удалось отправить сразу, переподключаемся...';
+                    showToast('Ошибка отправки, пробуем переподключиться', 'error');
+                }
+            } else {
+                statusEl.textContent = '⚠️ Канал связи закрыт — подключитесь к комнате и попробуйте снова.';
+                showToast('Нет активного канала с учителем', 'error');
+            }
+        }
+
+        function resetStudentCanvas() {
+            shufflePalette();
+            renderStudentSvgCanvas(state.activeTemplateId);
+        }
+
+        // =====================================================================
+        // 7. ВСПОМОГАТЕЛЬНЫЕ UI-УТИЛИТЫ
+        // =====================================================================
+        function showToast(message, type = 'info') {
+            const container = document.getElementById('toast-container');
+            const toast = document.createElement('div');
+            const colors = {
+                success: 'bg-emerald-600 text-white',
+                error: 'bg-rose-600 text-white',
+                info: 'bg-slate-800 text-white'
+            };
+            toast.className = `pointer-events-auto px-4 py-3 rounded-2xl shadow-xl font-bold text-sm animate-pop ${colors[type] || colors.info}`;
+            toast.textContent = message;
+            container.appendChild(toast);
+
+            setTimeout(() => {
+                toast.style.opacity = '0';
+                toast.style.transform = 'translateY(-8px)';
+                toast.style.transition = 'all 0.3s ease';
+                setTimeout(() => toast.remove(), 300);
+            }, 3400);
+        }
+
+        function showConfirmModal(title, message, onConfirm) {
+            const modal = document.getElementById('confirm-modal');
+            document.getElementById('confirm-title').textContent = title;
+            document.getElementById('confirm-message').textContent = message;
+            modal.classList.remove('hidden');
+
+            const btnOk = document.getElementById('confirm-ok');
+            const btnCancel = document.getElementById('confirm-cancel');
+
+            const cleanup = () => {
+                modal.classList.add('hidden');
+                btnOk.onclick = null;
+                btnCancel.onclick = null;
+            };
+
+            btnCancel.onclick = cleanup;
+            btnOk.onclick = () => {
+                cleanup();
+                onConfirm();
+            };
+        }
+
+        function formatTimeAgo(timestamp) {
+            if (!timestamp) return 'Только что';
+            const diffSec = Math.floor((Date.now() - timestamp) / 1000);
+            if (diffSec < 15) return 'Только что';
+            if (diffSec < 60) return `${diffSec} сек. назад`;
+            const diffMin = Math.floor(diffSec / 60);
+            return `${diffMin} мин. назад`;
+        }
+
+        function launchConfetti() {
+            const canvas = document.getElementById('confetti-canvas');
+            const ctx = canvas.getContext('2d');
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+
+            const pieces = [];
+            const colors = ['#ef4444', '#f59e0b', '#10b981', '#3b82f6', '#8b5cf6', '#ec4899'];
+            for (let i = 0; i < 120; i++) {
+                pieces.push({
+                    x: Math.random() * canvas.width,
+                    y: Math.random() * canvas.height - canvas.height,
+                    w: Math.random() * 10 + 6,
+                    h: Math.random() * 6 + 4,
+                    color: colors[Math.floor(Math.random() * colors.length)],
+                    speedY: Math.random() * 4 + 2.5,
+                    speedX: Math.random() * 3 - 1.5,
+                    rotation: Math.random() * 360,
+                    rotSpeed: Math.random() * 8 - 4
+                });
+            }
+
+            let frames = 0;
+            function animate() {
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                pieces.forEach(p => {
+                    p.y += p.speedY;
+                    p.x += p.speedX;
+                    p.rotation += p.rotSpeed;
+                    ctx.save();
+                    ctx.translate(p.x, p.y);
+                    ctx.rotate((p.rotation * Math.PI) / 180);
+                    ctx.fillStyle = p.color;
+                    ctx.fillRect(-p.w / 2, -p.h / 2, p.w, p.h);
+                    ctx.restore();
+                });
+                frames++;
+                if (frames < 150) {
+                    requestAnimationFrame(animate);
+                } else {
+                    ctx.clearRect(0, 0, canvas.width, canvas.height);
+                }
+            }
+            animate();
+        }
+
+        window.app = {
+            enterAsTeacher,
+            enterAsStudent,
+            confirmGoHome,
+            fillRandomStudentName,
+            copyRoomCode,
+            copyInviteLink,
+            launchTemplateForClass,
+            resendTemplateToAllStudents,
+            addDemoSubmission,
+            confirmClearSubmissions,
+            nextHeroWork,
+            toggleSlideshowPause,
+            requestSyncFromTeacher,
+            forceOpenFallbackTemplate,
+            shufflePalette,
+            revealAndSubmitWork,
+            resetStudentCanvas,
+            autoFillRemainingForTest
+        };
+
+        window.addEventListener('DOMContentLoaded', () => {
+            // Подхватываем код комнаты из параметра ?room=XXXX (например, после сканирования QR-кода)
+            const params = new URLSearchParams(window.location.search);
+            const roomParam = params.get('room');
+            if (roomParam) {
+                const cleanRoom = roomParam.trim().toUpperCase().slice(0, 4);
+                document.getElementById('student-room-input').value = cleanRoom;
+            }
+        });
+    </script>
+</body>
+</html>
